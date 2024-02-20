@@ -1,0 +1,1785 @@
+library(Seurat)
+
+merged<-readRDS("ThalamusOrganoidsChang.rds")
+merged <- SCTransform(merged, verbose = FALSE, vst.flavor = "v2")
+merged <- RunPCA(merged, npcs = 30)
+
+library(harmony)
+merged <- RunHarmony(merged, group.by.vars = "Batch", theta = 2, assay.use = "SCT")
+merged <- merged %>%
+RunUMAP(reduction = "harmony", dims = 1:30) %>%
+FindNeighbors(reduction = "harmony", dims = 1:30) %>%
+FindClusters(resolution = 0.5, algorithm = 2) %>%
+identity()
+p1 <- DimPlot(merged, reduction = "umap", label = TRUE, label.size = 10, group.by = "seurat_clusters") + NoAxes() + NoLegend()
+p2 <- DimPlot(merged, group.by = "Batch", shuffle = TRUE) + NoAxes()
+p3 <- DimPlot(merged, group.by = "Condition", pt.size = 0.001) + NoAxes()
+p4 <- DimPlot(merged, group.by = "donor_id", pt.size = 0.001) + NoAxes()
+cowplot::plot_grid(p1,p2,p3,p4)
+
+FeaturePlot(merged, c("TCF7L2","NTNG1", "FOXP2","SOX2"), order = TRUE)
+
+DefaultAssay(merged) <- 'RNA'
+merged <- NormalizeData(merged)
+
+library(SeuratWrappers)
+markers.merge <- RunPrestoAll(merged)
+
+saveRDS(merged, "ThalamusOrganoidsChang.rds")
+write.csv(markers.merged, "Markers_ThalamusOrganoidsChang.rds")
+
+p <- FeaturePlot(merged, c("FOXG1", "TCF7L2","EN1", "HOXB4",
+                           "SLC17A6","GBX2","LHX2","LHX9",
+                           "SLC32A1","LHX1","LHX5", "MEIS2",
+                           "MKI67","PAX6","OTX2","SOX9"), order =TRUE, combine = FALSE)
+for(i in 1:length(p)) {
+p[[i]] <- p[[i]] +  NoAxes() +NoLegend()
+}
+p2 <- cowplot::plot_grid(plotlist = p, ncol = 2)
+
+p <- FeaturePlot(merged, c("NEUROD1","ASCL1","EYA2","DACH1",
+                           "SOX2", "FOXP2", "NR2F1", "GBX2",
+                           "CALB1","CALB2","NR2F2","FOXP1",
+                           "PROX1","TNNT1","L1CAM","ROBO2"), order =FALSE, combine = FALSE)
+for(i in 1:length(p)) {
+  p[[i]] <- p[[i]] +  NoAxes() +NoLegend()
+}
+cowplot::plot_grid(plotlist = p, ncol = 4)
+
+p <- FeaturePlot(merged, c("FOXG1","EMX1","NKX2-1","TCF7L2","EN1","HOXB4",
+                           "SLC17A6","LHX9","GBX2","GAD1","LHX1","LHX5",
+                           "MEIS2", "ISL1","SOX14", "GATA3","BHLHE23","C1QL2",
+                           "POU4F1","NR4A2","SHH","FOXA2","NEUROD1","EYA2",
+                           "PAX6","OTX2","MKI67","AQP4","TTR","CLIC6",
+                           "OLIG2","PDGFRA", "DCN","FN1", "CLDN5","PECAM1"), order =TRUE, combine = FALSE)
+
+old <- c(0:35)
+
+celltype <- c("RG", "GABA", "AC", "GLUT", "RG", "GLUT", "AC", "GLUT","GABA","GABA", "RG", "DIV",
+            "GABA", "GLUT","GLUT", "GLUT","AC", "GLUT", "IPC","DIV", "DIV", "AC",
+            "IPC","GABA", "EC", "GLUT", "IPC", "RG", "DIV", "EP", "GABA", "RG","GLUT",
+            "AC","CP","AC")
+
+merged$clusters <- plyr::mapvalues(x = merged$seurat_clusters, from = old, to = celltype)
+DimPlot(merged, group.by = "clusters") + NoAxes() + NoTitle()
+
+saveRDS(merged, "ThalamusOrganoidsChang.rds")
+
+#Symphony Reference Mapping to primary thalamus reference atlas 
+
+  #first load utils_seurat
+
+buildReferenceFromSeurat <- function(
+    obj, assay = 'RNA', verbose = TRUE, save_umap = TRUE, save_uwot_path = NULL
+) {
+    if(!assay %in% c('RNA', 'SCT')) {
+        stop('Only supported assays are RNA or SCT.')
+    }
+    res <- list()
+    ## TODO: check that these objects are all correctly initialized
+    res$Z_corr <- t(obj@reductions$harmony@cell.embeddings)
+    res$Z_orig <- t(obj@reductions$pca@cell.embeddings)
+    message('Saved embeddings')
+    
+    res$R <- t(obj@reductions$harmony@misc$R[colnames(obj),]) # seurat does not subset misc slot
+    message('Saved soft cluster assignments')
+    
+    if (assay == 'RNA') {
+        vargenes_means_sds <- tibble(
+            symbol = obj@assays[[assay]]@var.features, 
+            mean = Matrix::rowMeans(obj@assays[[assay]]@data[obj@assays[[assay]]@var.features, ])
+        )
+        vargenes_means_sds$stddev <- rowSDs(
+            obj@assays[[assay]]@data[obj@assays[[assay]]@var.features, ], 
+            vargenes_means_sds$mean
+        )
+    } else if (assay == 'SCT') {
+        vargenes_means_sds <- tibble(
+            symbol = obj@assays[[assay]]@var.features, 
+            mean = Matrix::rowMeans(obj@assays[[assay]]@scale.data[obj@assays[[assay]]@var.features, ])
+        )
+        asdgc = Matrix(obj@assays[[assay]]@scale.data[obj@assays[[assay]]@var.features, ], sparse = TRUE)
+        vargenes_means_sds$stddev <- rowSDs(
+            asdgc, 
+            vargenes_means_sds$mean
+        )
+    }
+    
+    res$vargenes_means_sds <- vargenes_means_sds
+    message('Saved variable gene information for ', nrow(vargenes_means_sds), ' genes.')
+    
+    res$loadings <- obj@reductions$pca@feature.loadings
+    message('Saved PCA loadings.')
+    
+    res$meta_data <- obj@meta.data
+    message('Saved metadata.')
+    
+    ## Check UMAP 
+    if (save_umap) {
+        if (is.null(save_uwot_path)) {
+            error('Please provide a valid path to save_uwot_path in order to save uwot model.')
+        }
+        if (is.null(obj@reductions$umap@misc$model)) {
+            error('uwot model not initialiazed in Seurat object. Please do RunUMAP with umap.method=\'uwot\', return.model=TRUE first.')
+        }
+        res$umap <- obj@reductions$umap@misc$model
+        res$save_uwot_path <- save_uwot_path
+        if (file.exists(res$save_uwot_path)) {
+            file.remove(res$save_uwot_path)    
+        }
+        uwot::save_uwot(res$umap, save_uwot_path)
+    }
+    
+    ## Build Reference! 
+    if (verbose) 
+        message("Calculate final L2 normalized reference centroids (Y_cos)")
+    res$centroids = t(cosine_normalize_cpp(res$R %*% t(res$Z_corr), 1))
+    if (verbose) 
+        message("Calculate reference compression terms (Nr and C)")
+    res$cache = compute_ref_cache(res$R, res$Z_corr)
+    colnames(res$Z_orig) = row.names(res$metadata)
+    rownames(res$Z_orig) = paste0("PC_", seq_len(nrow(res$Z_corr)))
+    colnames(res$Z_corr) = row.names(res$metadata)
+    rownames(res$Z_corr) = paste0("harmony_", seq_len(nrow(res$Z_corr)))
+        
+    if (verbose) 
+        message("Finished nicely.")
+    return(res)    
+}
+
+environment(buildReferenceFromSeurat) <- environment(symphony::buildReference)
+
+RunHarmony.Seurat <- function(
+  object,
+  group.by.vars,
+  reduction = 'pca',
+  dims.use = NULL,
+  theta = NULL,
+  lambda = NULL,
+  sigma = 0.1,
+  nclust = NULL,
+  tau = 0,
+  block.size = 0.05,
+  max.iter.harmony = 10,
+  max.iter.cluster = 20,
+  epsilon.cluster = 1e-5,
+  epsilon.harmony = 1e-4,
+  plot_convergence = FALSE,
+  verbose = TRUE,
+  reference_values = NULL,
+  reduction.save = "harmony",
+  assay.use = 'RNA',
+  project.dim = TRUE,
+  ...
+) {
+  if (reduction == "pca") {
+    tryCatch(
+      embedding <- Seurat::Embeddings(object, reduction = "pca"),
+      error = function(e) {
+        if (verbose) {
+          message("Harmony needs PCA. Trying to run PCA now.")
+        }
+        tryCatch(
+          object <- Seurat::RunPCA(
+            object,
+            assay = assay.use, verbose = verbose
+          ),
+          error = function(e) {
+            stop("Harmony needs PCA. Tried to run PCA and failed.")
+          }
+        )
+      }
+    )
+  } else {
+    available.dimreduc <- names(methods::slot(object = object, name = "reductions"))
+    if (!(reduction %in% available.dimreduc)) {
+      stop("Requested dimension reduction is not present in the Seurat object")
+    }
+    embedding <- Seurat::Embeddings(object, reduction = reduction)
+  }
+  if (is.null(dims.use)) {
+    dims.use <- seq_len(ncol(embedding))
+  }
+  dims_avail <- seq_len(ncol(embedding))
+  if (!all(dims.use %in% dims_avail)) {
+    stop("trying to use more dimensions than computed. Rereun dimension reduction
+         with more dimensions or run Harmony with fewer dimensions")
+  }
+  if (length(dims.use) == 1) {
+    stop("only specified one dimension in dims.use")
+  }
+  metavars_df <- Seurat::FetchData(object, group.by.vars)
+    
+  harmonyObject <- HarmonyMatrix(
+    embedding,
+    metavars_df,
+    group.by.vars,
+    FALSE,
+    0,
+    theta,
+    lambda,
+    sigma,
+    nclust,
+    tau,
+    block.size,
+    max.iter.harmony,
+    max.iter.cluster,
+    epsilon.cluster,
+    epsilon.harmony,
+    plot_convergence,
+    TRUE,
+    verbose,
+    reference_values
+  )
+
+  harmonyEmbed <- t(as.matrix(harmonyObject$Z_corr))
+  rownames(harmonyEmbed) <- row.names(embedding)
+  colnames(harmonyEmbed) <- paste0(reduction.save, "_", seq_len(ncol(harmonyEmbed)))
+
+  harmonyClusters <- t(harmonyObject$R)
+  rownames(harmonyClusters) <- row.names(embedding)
+  colnames(harmonyClusters) <- paste0('R', seq_len(ncol(harmonyClusters)))
+  
+  suppressWarnings({
+    harmonydata <- Seurat::CreateDimReducObject(
+      embeddings = harmonyEmbed,
+      stdev = as.numeric(apply(harmonyEmbed, 2, stats::sd)),
+      assay = assay.use,
+      key = reduction.save,
+      misc=list(R=harmonyClusters)
+    )
+  })
+
+  object[[reduction.save]] <- harmonydata
+  if (project.dim) {
+    object <- Seurat::ProjectDim(
+      object,
+      reduction = reduction.save,
+      overwrite = TRUE,
+      verbose = FALSE
+    )
+  }
+  return(object)
+}
+
+environment(RunHarmony.Seurat) <- environment(harmony::HarmonyMatrix)
+
+RunUMAP2 <- function (object, reduction.key = "UMAP_", assay = NULL, reduction.model = NULL, 
+    return.model = FALSE, umap.method = "uwot", n.neighbors = 30L, 
+    n.components = 2L, metric = "cosine", n.epochs = NULL, learning.rate = 1, 
+    min.dist = 0.3, spread = 1, set.op.mix.ratio = 1, local.connectivity = 1L, 
+    repulsion.strength = 1, negative.sample.rate = 5, a = NULL, 
+    b = NULL, uwot.sgd = FALSE, seed.use = 42, metric.kwds = NULL, 
+    angular.rp.forest = FALSE, verbose = TRUE, ...) 
+{
+    CheckDots(...)
+    if (!is.null(x = seed.use)) {
+        set.seed(seed = seed.use)
+    }
+    if (umap.method != "umap-learn" && getOption("Seurat.warn.umap.uwot", 
+        TRUE)) {
+        warning("The default method for RunUMAP has changed from calling Python UMAP via reticulate to the R-native UWOT using the cosine metric", 
+            "\nTo use Python UMAP via reticulate, set umap.method to 'umap-learn' and metric to 'correlation'", 
+            "\nThis message will be shown once per session", 
+            call. = FALSE, immediate. = TRUE)
+        options(Seurat.warn.umap.uwot = FALSE)
+    }
+    if (umap.method == "uwot-learn") {
+        warning("'uwot-learn' is deprecated. Set umap.method = 'uwot' and return.model = TRUE")
+        umap.method <- "uwot"
+        return.model <- TRUE
+    }
+    if (return.model) {
+        if (verbose) {
+            message("UMAP will return its model")
+        }
+        umap.method = "uwot"
+    }
+    if (inherits(x = object, what = "Neighbor")) {
+        object <- list(idx = Indices(object), dist = Distances(object))
+    }
+    if (!is.null(x = reduction.model)) {
+        if (verbose) {
+            message("Running UMAP projection")
+        }
+        umap.method <- "uwot-predict"
+    }
+    umap.output <- switch(EXPR = umap.method, `umap-learn` = {
+        if (!py_module_available(module = "umap")) {
+            stop("Cannot find UMAP, please install through pip (e.g. pip install umap-learn).")
+        }
+        if (!is.null(x = seed.use)) {
+            py_set_seed(seed = seed.use)
+        }
+        if (typeof(x = n.epochs) == "double") {
+            n.epochs <- as.integer(x = n.epochs)
+        }
+        umap_import <- import(module = "umap", delay_load = TRUE)
+        umap <- umap_import$UMAP(n_neighbors = as.integer(x = n.neighbors), 
+            n_components = as.integer(x = n.components), metric = metric, 
+            n_epochs = n.epochs, learning_rate = learning.rate, 
+            min_dist = min.dist, spread = spread, set_op_mix_ratio = set.op.mix.ratio, 
+            local_connectivity = local.connectivity, repulsion_strength = repulsion.strength, 
+            negative_sample_rate = negative.sample.rate, a = a, 
+            b = b, metric_kwds = metric.kwds, angular_rp_forest = angular.rp.forest, 
+            verbose = verbose)
+        umap$fit_transform(as.matrix(x = object))
+    }, uwot = {
+        if (metric == "correlation") {
+            warning("UWOT does not implement the correlation metric, using cosine instead", 
+                call. = FALSE, immediate. = TRUE)
+            metric <- "cosine"
+        }
+        if (is.list(x = object)) {
+            umap(X = NULL, nn_method = object, n_threads = nbrOfWorkers(), 
+                n_components = as.integer(x = n.components), 
+                metric = metric, n_epochs = n.epochs, learning_rate = learning.rate, 
+                min_dist = min.dist, spread = spread, set_op_mix_ratio = set.op.mix.ratio, 
+                local_connectivity = local.connectivity, repulsion_strength = repulsion.strength, 
+                negative_sample_rate = negative.sample.rate, 
+                a = a, b = b, fast_sgd = uwot.sgd, verbose = verbose, 
+                ret_model = return.model)
+        } else {
+            umap(X = object, n_threads = nbrOfWorkers(), n_neighbors = as.integer(x = n.neighbors), 
+                n_components = as.integer(x = n.components), 
+                metric = metric, n_epochs = n.epochs, learning_rate = learning.rate, 
+                min_dist = min.dist, spread = spread, set_op_mix_ratio = set.op.mix.ratio, 
+                local_connectivity = local.connectivity, repulsion_strength = repulsion.strength, 
+                negative_sample_rate = negative.sample.rate, 
+                a = a, b = b, fast_sgd = uwot.sgd, verbose = verbose, 
+                ret_model = return.model)
+        }
+    }, `uwot-predict` = {
+        if (metric == "correlation") {
+            warning("UWOT does not implement the correlation metric, using cosine instead", 
+                call. = FALSE, immediate. = TRUE)
+            metric <- "cosine"
+        }
+        if (is.null(x = reduction.model) || !inherits(x = reduction.model, 
+            what = "DimReduc")) {
+            stop("If running projection UMAP, please pass a DimReduc object with the model stored to reduction.model.", 
+                call. = FALSE)
+        }
+        model <- Misc(object = reduction.model, slot = "model")
+        if (length(x = model) == 0) {
+            stop("The provided reduction.model does not have a model stored. Please try running umot-learn on the object first", 
+                call. = FALSE)
+        }
+        if (is.list(x = object)) {
+            uwot::umap_transform(X = NULL, nn_method = object, 
+                model = model, n_threads = nbrOfWorkers(), n_epochs = n.epochs, 
+                verbose = verbose)
+        } else {
+            umap_transform(X = object, model = model, n_threads = nbrOfWorkers(), 
+                n_epochs = n.epochs, verbose = verbose)
+        }
+    }, stop("Unknown umap method: ", umap.method, call. = FALSE))
+    if (return.model) {
+#         umap.output$nn_index <- NULL
+        umap.model <- umap.output
+        umap.output <- umap.output$embedding
+    }
+    colnames(x = umap.output) <- paste0(reduction.key, 1:ncol(x = umap.output))
+    if (inherits(x = object, what = "dist")) {
+        rownames(x = umap.output) <- attr(x = object, "Labels")
+    }
+    else if (is.list(x = object)) {
+        rownames(x = umap.output) <- rownames(x = object$idx)
+    }
+    else {
+        rownames(x = umap.output) <- rownames(x = object)
+    }
+    umap.reduction <- CreateDimReducObject(embeddings = umap.output, 
+        key = reduction.key, assay = assay, global = TRUE)
+    if (return.model) {
+        Misc(umap.reduction, slot = "model") <- umap.model
+    }
+    return(umap.reduction)
+}
+
+
+environment(RunUMAP2) <- environment(Seurat:::RunUMAP.default)
+
+mapQuery <- function (exp_query, metadata_query, ref_obj, vars = NULL, verbose = TRUE, 
+    do_normalize = TRUE, do_umap = TRUE, sigma = 0.1, return_type = c('symphony', 'Seurat')) 
+{
+    if (return_type == 'Seurat') {
+        que <- Seurat::CreateSeuratObject(
+            counts=exp_query,
+            meta.data=metadata_query,
+            assay='SymphonyQuery'
+        )        
+    }
+    
+    if (do_normalize) {
+        if (verbose) 
+            message("Normalizing")
+        exp_query = normalizeData(exp_query, 10000, "log")
+    }
+    if (verbose) 
+        message("Scaling and synchronizing query gene expression")
+    idx_shared_genes = which(ref_obj$vargenes$symbol %in% rownames(exp_query))
+    shared_genes = ref_obj$vargenes$symbol[idx_shared_genes]
+    if (verbose) 
+        message("Found ", length(shared_genes), " reference variable genes in query dataset")
+    exp_query_scaled = scaleDataWithStats(exp_query[shared_genes, 
+        ], ref_obj$vargenes$mean[idx_shared_genes], ref_obj$vargenes$stddev[idx_shared_genes], 
+        1)
+    exp_query_scaled_sync = matrix(0, nrow = length(ref_obj$vargenes$symbol), 
+        ncol = ncol(exp_query))
+    exp_query_scaled_sync[idx_shared_genes, ] = exp_query_scaled
+    rownames(exp_query_scaled_sync) = ref_obj$vargenes$symbol
+    colnames(exp_query_scaled_sync) = colnames(exp_query)
+    if (verbose) 
+        message("Project query cells using reference gene loadings")
+    Z_pca_query = t(ref_obj$loadings) %*% exp_query_scaled_sync
+    if (verbose) 
+        message("Clustering query cells to reference centroids")
+    Z_pca_query_cos = cosine_normalize_cpp(Z_pca_query, 2)
+    R_query = soft_cluster(ref_obj$centroids, Z_pca_query_cos, 
+        sigma)
+    if (verbose) 
+        message("Correcting query batch effects")
+    if (!is.null(vars)) {
+        design = droplevels(metadata_query)[, vars] %>% as.data.frame()
+        onehot = design %>% purrr::map(function(.x) {
+            if (length(unique(.x)) == 1) {
+                rep(1, length(.x))
+            }
+            else {
+                stats::model.matrix(~0 + .x)
+            }
+        }) %>% purrr::reduce(cbind)
+        Xq = cbind(1, intercept = onehot) %>% t()
+    }
+    else {
+        Xq = Matrix(rbind(rep(1, ncol(Z_pca_query)), rep(1, ncol(Z_pca_query))), 
+            sparse = TRUE)
+    }
+    Zq_corr = moe_correct_ref(as.matrix(Z_pca_query), as.matrix(Xq), 
+        as.matrix(R_query), as.matrix(ref_obj$cache[[1]]), as.matrix(ref_obj$cache[[2]]))
+    colnames(Z_pca_query) = row.names(metadata_query)
+    rownames(Z_pca_query) = paste0("PC_", seq_len(nrow(Zq_corr)))
+    colnames(Zq_corr) = row.names(metadata_query)
+    rownames(Zq_corr) = paste0("harmony_", seq_len(nrow(Zq_corr)))
+    umap_query = NULL
+    if (do_umap & !is.null(ref_obj$save_uwot_path)) {
+        if (verbose) 
+            message("UMAP")
+        ref_umap_model = uwot::load_uwot(ref_obj$save_uwot_path, 
+            verbose = FALSE)
+        
+        ## UMAP may have been learned on subset of columns
+        umap_query = uwot::umap_transform(t(Zq_corr)[, 1:ref_umap_model$norig_col], ref_umap_model)
+#         umap_query = uwot::umap_transform(t(Zq_corr), ref_umap_model)
+        colnames(umap_query) = c("UMAP1", "UMAP2")
+        rownames(umap_query) <- row.names(metadata_query)
+    }
+    if (verbose) 
+        message("All done!")
+    
+    if (return_type == 'Seurat') {
+        que@assays$SymphonyQuery@data <- exp_query
+        que@assays$SymphonyQuery@scale.data <- exp_query_scaled_sync
+        que[['pca']] <- Seurat::CreateDimReducObject(
+            embeddings = t(Z_pca_query),
+            loadings = ref_obj$loadings, 
+            stdev = as.numeric(apply(Z_pca_query, 1, stats::sd)),
+            assay = 'SymphonyQuery',
+            key = 'pca_'
+        )
+        que[['harmony']] <- Seurat::CreateDimReducObject(
+            embeddings = t(Zq_corr),
+            stdev = as.numeric(apply(Zq_corr, 1, stats::sd)),
+            assay = 'SymphonyQuery',
+            key = 'harmony_',
+            misc=list(R=R_query)
+        )
+        que <- Seurat::ProjectDim(que, reduction = 'harmony', overwrite = TRUE, verbose = FALSE)
+        if (do_umap) {
+            que[['umap']] <- Seurat::CreateDimReducObject(
+                embeddings = umap_query,
+                assay = 'SymphonyQuery',
+                key = 'umap_'
+            )            
+        }
+        return(que)
+    } else if (return_type == 'symphony') {
+        return(list(Z = Zq_corr, Zq_pca = Z_pca_query, R = R_query, 
+            Xq = Xq, umap = umap_query, meta_data = metadata_query))
+    } else {
+        stop(glue('The return type = \"{return_type}\" is not available.'))
+    }
+    
+}
+
+environment(mapQuery) <- environment(symphony::mapQuery)
+
+knnPredict.Seurat <- function(query_obj, ref_obj, label_transfer, k = 5, confidence = TRUE, seed = 0) 
+{
+    set.seed(seed)
+    if (!label_transfer %in% colnames(ref_obj$meta_data)) {
+        stop('Label \"{label_transfer}\" is not available in the reference metadata.')
+    }
+    
+    if (confidence) {
+        knn_pred <- class::knn(t(ref_obj$Z_corr), Embeddings(query_obj, 'harmony'), 
+            ref_obj$meta_data[[label_transfer]], k = k, prob = TRUE)
+        knn_prob = attributes(knn_pred)$prob
+        query_obj@meta.data[[label_transfer]] <- knn_pred
+        query_obj@meta.data[paste0(label_transfer, '_prob')] = knn_prob
+    } else {
+        knn_pred <- class::knn(t(ref_obj$Z_corr), Embeddings(query_obj, 'harmony'), 
+            ref_obj$meta_data[[label_transfer]], k = k, prob = FALSE)
+        query_obj@meta.data[[label_transfer]] <- knn_pred
+    }
+    return(query_obj)
+}
+
+#load reference atlas and perform symphony preprocessing step to make it compatible with reference mapping 
+
+ref <- readRDS("2ndTrimester_Thalamus_Reference.rds")
+ref[['umap']] <- RunUMAP2(Embeddings(ref, 'harmony')[, 1:30], 
+                          assay='SCT', verbose=FALSE, umap.method='uwot', return.model=TRUE)
+DimPlot(ref, label = TRUE, group.by = "seurat_clusters") + DimPlot(ref, group.by = "clusters", label = TRUE)
+
+ctx.list <- lapply(X = ctx.list, FUN = function(x) {
+x <- SCTransform(x, verbose = FALSE, vst.flavor = "v2")
+})
+
+#need to repeat RunUMAP2 after saving rds
+
+ref[['umap']] <- RunUMAP2(Embeddings(ref, 'harmony')[, 1:30], 
+                          assay='SCT', verbose=FALSE, umap.method='uwot', return.model=TRUE)
+ref2 <-  buildReferenceFromSeurat(ref, assay = 'SCT',
+                                 verbose = TRUE, save_umap = TRUE, save_uwot_path = 'cache_symphony.uwot')
+merged <- SCTransform(merged, verbose = FALSE, vst.flavor = "v2",return.only.var.genes = FALSE)
+query <- mapQuery(
+merged@assays$SCT@scale.data,
+merged@meta.data,
+ref2,
+vars = 'Batch',
+do_normalize = TRUE,
+return_type = 'Seurat' # return a Seurat object
+)
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(ref, reduction = 'umap', shuffle = TRUE, group.by = "clusters") + labs(title = 'Original Reference (Clusters)')) +
+(DimPlot(query, reduction = 'umap', shuffle = TRUE, group.by = "clusters") + labs(title = 'Mapped Query (Donors)'))
+query <- knnPredict.Seurat(query, ref2, 'clusters', confidence = TRUE) #confidence = TRUE gives you a prediction score
+table(query$clusters_prob)
+table(query$clusters_prob,query$clusters)
+query2 <- subset(query, subset = clusters_prob > 0.6)
+table(query2$clusters_prob,query2$clusters)
+table(query2$donor_id,query2$clusters)
+(DimPlot(query2, reduction = 'umap', group.by = 'clusters', shuffle = TRUE, label = TRUE) + labs(title = 'Original Reference (Clusters)') + NoAxes() + NoLegend())+
+(DimPlot(ref, reduction = 'umap', group.by = 'clusters', shuffle = TRUE, label = TRUE) + labs(title = 'Mapped Query (Predicted Clusters)') +NoAxes() + NoLegend())
+query2$celltype <- plyr::mapvalues(x=query2$clusters, from = c("AC1","AC2"), to = rep("AC",2))
+query2$celltype <- plyr::mapvalues(x=query2$celltype, from = c("EN1","EN2"), to = rep("EN",2))
+query2$celltype <- plyr::mapvalues(x=query2$celltype, from = c("IN1","IN2","IN3","IN4","IN5","IN6"), to = rep("IN",6))
+table <- table(query2$celltype,query$donor_id)
+table <- table(query2$celltype,query2$donor_id)
+prop.table <- data.frame(table)
+library(dittoSeq)
+ggplot(prop.table, aes(x = Var2, y = Freq, fill = Var1)) +
+geom_col(position = "fill") + scale_fill_manual(values = dittoColors())
+
+
+
+
+; ; ref <- RunPCA(ref)
+ref2 <-  buildReferenceFromSeurat(ref, assay = 'RNA',
+verbose = TRUE, save_umap = TRUE, save_uwot_path = 'cache_symphony.uwot')
+library(harmony)
+ref2 <-  buildReferenceFromSeurat(ref, assay = 'RNA',
+verbose = TRUE, save_umap = TRUE, save_uwot_path = 'cache_symphony.uwot')
+DefaultAssay(ref) <- 'SCT'
+ref[['umap']] <- RunUMAP2(Embeddings(ref, 'harmony')[, 1:30],
+assay='RNA', verbose=FALSE, umap.method='uwot', return.model=TRUE)
+DefaultAssay(ref) <- 'RNA'; ref <- NormalizeData(ref);
+VariableFeatures(ref) <- var.intersect; ref <- ScaleData(ref); ref <- RunPCA(ref)
+ref2 <-  buildReferenceFromSeurat(ref, assay = 'RNA',
+verbose = TRUE, save_umap = TRUE, save_uwot_path = 'cache_symphony.uwot')
+library(symphony)
+ref2 <-  buildReferenceFromSeurat(ref, assay = 'RNA',
+verbose = TRUE, save_umap = TRUE, save_uwot_path = 'cache_symphony.uwot')
+ref <- readRDS("../../spatial/Reference_2ndTriThal_cleaned_forSymphony_083123.rds")
+gc()
+ref
+DefaultAssay(ref) <- 'SCT'
+ref
+ref = ref %>%
+RunPCA(verbose = FALSE, npcs = 30) %>%
+RunHarmony.Seurat(group.by.vars = c('Sample','method'), assay.use = "SCT", project.dim = F,
+plot_convergence = TRUE, reduction = "pca") %>%
+FindNeighbors(dims = 1:30, reduction = 'harmony', verbose = FALSE) %>%
+FindClusters(resolution = 0.6, verbose = FALSE, algorithm = 2) # previous version of this tutorial was missing reduction argument
+ref[['umap']] <- RunUMAP2(Embeddings(ref, 'harmony')[, 1:30],
+assay='SCT', verbose=FALSE, umap.method='uwot', return.model=TRUE)
+DimPlot(ref)
+ref[['umap']] <- RunUMAP2(Embeddings(ref, 'harmony')[, 1:30],
+assay='RNA', verbose=FALSE, umap.method='uwot', return.model=TRUE)
+DimPlot(ref)
+ref2 <-  buildReferenceFromSeurat(ref, assay = 'SCT',
+verbose = TRUE, save_umap = TRUE, save_uwot_path = 'cache_symphony.uwot')
+query <- mapQuery(
+merged@assays$SCT@scale.data,
+merged@meta.data,
+ref2,
+vars = 'Batch',
+do_normalize = TRUE,
+return_type = 'Seurat' # return a Seurat object
+)
+merged
+merged <- SCTransform(merged, verbose = FALSE, vst.flavor = "v2")
+gc()
+query <- mapQuery(
+merged@assays$SCT@scale.data,
+merged@meta.data,
+ref2,
+vars = 'Batch',
+do_normalize = TRUE,
+return_type = 'Seurat' # return a Seurat object
+)
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(ref, reduction = 'umap', shuffle = TRUE, group.by = "clusters") + labs(title = 'Original Reference (Clusters)')) +
+(DimPlot(query, reduction = 'umap', shuffle = TRUE, group.by = "clusters") + labs(title = 'Mapped Query (Donors)'))
+library(ggplot2)
+
+
+#Finding DEGs in 22q thal org
+
+#remove sex dimorphism genes
+library(biomaRt)
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+
+sex <- getBM(attributes= c("hgnc_symbol","chromosome_name"),
+             filters="chromosome_name",
+             values=c("X","Y"), mart=ensembl)
+
+counts <- GetAssayData(query2, assay = "SymphonyQuery")
+rownames <- which(rownames(counts) %in% sex$hgnc_symbol)
+
+counts <- counts[-c(rownames),]
+
+merged <- subset(merged, features = rownames(counts))
+
+Idents(merged) <- merged$clusters
+library(variancePartition)
+library(EnhancedVolcano)
+
+for(i in 1:length(table(merged$clusters))){
+  cluster <- subset(merged, idents = as.character(levels(merged@meta.data$clusters)[i]))
+  Idents(cluster) <- cluster$Condition
+  deg <- FindMarkers(cluster, ident.1 = "22Q", ident.2 = "CTRL", only.pos = FALSE, logfc.threshold = 0.1, test.use = "MAST", latent.vars = "Batch")
+  write.csv(deg, paste0('DEG_preVarPart_',as.character(levels(merged@meta.data$clusters)[i]),'.csv'))
+  varParMatrix <- as.matrix(t(FetchData(cluster, vars = rownames(deg))))
+  varParInfo <- as.data.frame(cluster@meta.data)
+  formGene<-~(1|Condition)+(1|Batch)+(1|donor_id)
+  varPartGene<-fitExtractVarPartModel(varParMatrix, formGene, varParInfo)
+  sorted<-varPartGene[order(varPartGene$Condition, decreasing=TRUE),]
+  plot <- plotVarPart(sorted)
+  ggsave(paste0("plotVarPart_",as.character(levels(merged@meta.data$clusters)[i]),'.pdf'))
+  write.csv(sorted, paste0('VariancePartition_',as.character(levels(merged@meta.data$clusters)[i]),'.csv'))
+}
+
+#looks like <25% is a good cutoff for contribution from batch and line effect 
+for(i in 1:length(table(merged$clusters))){
+  deg <- read.csv(paste0('DEG_preVarPart_',as.character(levels(merged@meta.data$clusters)[i]),'.csv'))
+  sorted <- read.csv(paste0('VariancePartition_',as.character(levels(merged@meta.data$clusters)[i]),'.csv'))
+  sorted <- sorted[sorted$Batch <= 0.25 & sorted$donor_id <= 0.25,]
+  deg <- deg[deg$X %in% sorted$X,]
+  deg <- deg[deg$p_val_adj <= 0.05,]
+  write.csv(deg, paste0('DEG_postVarPart',as.character(levels(merged@meta.data$clusters)[i]),'.csv'))
+  EnhancedVolcano(deg,
+                lab = rownames(deg),
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                FCcutoff = 0.25,
+                labSize = 5)
+}
+
+library(tidyr)
+
+thal.en <- read.csv("../celltypes2023/DEG_postVarPartGLUT.csv")
+thal.in <- read.csv("../celltypes2023/DEG_postVarPartGABA.csv")
+thal.ac <- read.csv("../celltypes2023/DEG_postVarPartAC.csv")
+thal.ipc <- read.csv("../celltypes2023/DEG_postVarPartIPC.csv")
+thal.gl <- read.csv("../celltypes2023/DEG_postVarPartRG.csv")
+thal.div <- read.csv("../celltypes2023/DEG_postVarPartDIV.csv")
+thal.en$celltype <- "Thal_EN"
+thal.in$celltype <- "Thal_IN"
+thal.ac$celltype <- "Thal_AC"
+thal.ipc$celltype <- "Thal_IPC"
+thal.gl$celltype <- "Thal_GL"
+thal.div$celltype <- "Thal_DIV"
+deg2 <- as.data.frame(rbind(thal.en, thal.in, thal.ac, thal.ipc, thal.gl, thal.div))
+
+dex_summary = deg2 %>%
+  dplyr::group_by(celltype) %>%
+  dplyr::summarize(
+    n_up = sum(p_val_adj <= 0.05 & avg_log2FC > 0.1),
+    n_down = -sum(p_val_adj <= 0.05 & avg_log2FC < -0.1)
+  ) %>%
+  pivot_longer(-celltype, names_to = "direction", values_to = "n")
+
+dex_summary$celltype <- factor(dex_summary$celltype, levels = c(
+  "Thal_EN","Thal_IN","Thal_AC","Thal_DIV","Thal_GL", "Thal_IPC"
+))
+
+
+# plot
+dex_summary %>%
+  ggplot(aes(x = celltype, y = n, fill = direction)) + 
+  ## using geom_col() instead of geom_bar(stat = "identity")
+  geom_col() +
+  geom_text(aes(label=n, vjust = -sign(n))) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  ## adding a little padding to the y scale for the numbers
+  scale_y_continuous(expand = expansion(add = 300)) + scale_fill_manual(values = c("#56B4E9","#B14380"))+
+  ggtitle("Dex numbers per group")
+
+#disease gene comparison
+# UpSet Plot
+scz <- read.csv("../celltypes2023/22qThalDEG.csv", header = TRUE)
+pm <- read.csv("../celltypes2023/postmortem_genes.csv", header = TRUE)
+cnv <- read.csv("../celltypes2023/CNV Gene Comparisons.csv", header = TRUE)
+gwas <- read.csv("../celltypes2023/GWAS_RareCodingVariants.csv", header = TRUE)
+
+thal.en <- read.csv("../celltypes2023/DEG_postVarPartGLUT.csv")
+thal.in <- read.csv("../celltypes2023/DEG_postVarPartGABA.csv")
+thal.ac <- read.csv("../celltypes2023/DEG_postVarPartAC.csv")
+thal.ipc <- read.csv("../celltypes2023/DEG_postVarPartIPC.csv")
+thal.gl <- read.csv("../celltypes2023/DEG_postVarPartRG.csv")
+thal.div <- read.csv("../celltypes2023/DEG_postVarPartDIV.csv")
+
+
+thal.en$celltype <- "Thal_EN"
+thal.in$celltype <- "Thal_IN"
+thal.ipc$celltype <- "Thal_IPC"
+thal.ac$celltype <- "Thal_AC"
+thal.gl$celltype <- "Thal_GL"
+thal.div$celltype <- "Thal_DIV"
+deg <- rbind(thal.en, thal.in, thal.ipc, thal.ac, thal.gl, thal.div)
+deg <- deg[deg$p_val_adj <= 0.05,]
+
+ctx.div <- read.csv("../CorticalOrg/downsample_MAST_reattempt/DEG_postVarPart_Ctx_RNA_10pctDIV.csv")
+ctx.div$celltype <- "CTX_DIV"
+
+ctx.et <- read.csv("../CorticalOrg/downsample_MAST_reattempt/DEG_postVarPart_Ctx_RNA_10pctET-SPN-EN-combined.csv")
+ctx.et$celltype <- "CTX_ET"
+ctx.it <- read.csv("../CorticalOrg/downsample_MAST_reattempt/DEG_postVarPart_Ctx_RNA_10pctIT EN.csv")
+ctx.it$celltype <- "CTX_IT"
+ctx.ipc <- read.csv("../CorticalOrg/downsample_MAST_reattempt/DEG_postVarPart_Ctx_RNA_10pctIPC.csv")
+ctx.ipc$celltype <- "CTX_IPC"
+ctx.rg <- read.csv("../CorticalOrg/downsample_MAST_reattempt/DEG_postVarPart_Ctx_RNA_10pctRG.csv")
+ctx.rg$celltype <- "CTX_RG"
+ctx.en <- read.csv("DEG_Ctx_RNA_preVarPart_allEN.csv")
+ctx.en$celltype <- "CTX_EN"
+ctx.en$X.1 <- rownames(ctx.en)
+ctx <- ctx[ctx$p_val_adj <= 0.05,]
+ctx <- rbind(ctx.et,ctx.it,ctx.ipc,ctx.rg,ctx.div)
+
+i <- length(ctx$celltype)
+j <- length(deg$celltype)
+
+for i in levels(ctx$celltype)[i]{
+  
+}
+
+
+
+
+ctx <- rbind(ctx.sp,ctx.et,ctx.it,ctx.ipc, ctx.rg, ctx.div)
+
+ctx$celltype <- factor(ctx$celltype)
+
+length(intersect(ctx.div$X,en$X)); length(ctx.div$X); length(en$X)
+
+
+#establish background gene lists
+bkgd<-rownames(merged)
+
+pm <- pm[pm$gene %in% bkgd,]
+cnv <- cnv[cnv$gene %in% bkgd,]
+gwas <- gwas[gwas$gene %in% bkgd,]
+
+unique(pm$condition)
+unique(cnv$citation)
+unique(cnv$condition)
+unique(gwas$citation)
+unique(deg$condition)
+
+del <- deg[deg$X %in% scz$genes,]
+
+ggplot(del, aes(x = avg_log2FC, y = -log10(p_val_adj), color = celltype,
+label = X)) + geom_point() +theme_minimal() +
+geom_text() + scale_color_manual(
+values = c("#E69F00","#56B4E9","#F0E442","#CC79A7","#666666", "#AD7700"))
+
+ggplot(del, aes(x = avg_log2FC, y = -log10(p_val_adj), color = celltype)) + 
+  geom_point() +theme_minimal() +
+  scale_color_manual(
+    values = c("#E69F00","#56B4E9","#F0E442","#CC79A7","#666666", "#AD7700"))
+
+
+#comparing DEGs against GWAS/rare coding variants
+
+lt <- list(GLUT = deg[deg$condition == "GLUT",]$gene,
+           GABA = deg[deg$condition == "GABA",]$gene,
+           IPC = deg[deg$condition == "IPC",]$gene,
+           RG = deg[deg$condition == "RG",]$gene,
+           DIV = deg[deg$condition == "DIV",]$gene,
+           AC = deg[deg$condition == "AC",]$gene,
+           #FB = deg[deg$condition == "FB",]$gene,
+           #EC = deg[deg$condition == "EC",]$gene,
+           
+           #ASD_GWAS = gwas[gwas$citation == "ASD_Spark2020",]$gene,
+           #ASD_GWAS_Grove = gwas[gwas$citation == "ASD_Grove2019",]$gene,
+           #SCZ_GWAS = gwas[gwas$citation == "SCZ_Trubetskoy2022",]$gene,
+           #BP_GWAS = gwas[gwas$citation == "BP_Mullins2021",]$gene
+           #ASD_rare = gwas[gwas$citation == "ASDrare_FuSatterstrom2022",]$gene,
+           
+) 
+
+           
+lt <- list(sp = sp$X, it = it$X, et = et$X, ipc = ipc$X,
+          rg = rg$X, div = div$X,
+          ASD_rare = gwas[gwas$citation == "ASDrare_FuSatterstrom2022",]$gene)
+
+
+
+
+
+
+
+
+
+lt <- list(THAL_EN = deg[deg$celltype == "Thal_EN"&deg$avg_log2FC>0,]$X,
+           THAL_IN = deg[deg$celltype == "Thal_IN"&deg$avg_log2FC>0,]$X,
+           THAL_IPC = deg[deg$celltype == "Thal_IPC"&deg$avg_log2FC>0,]$X,
+           THAL_GL = deg[deg$celltype == "Thal_GL"&deg$avg_log2FC>0,]$X,
+           THAL_DIV = deg[deg$celltype == "Thal_DIV"&deg$avg_log2FC>0,]$X,
+           THAL_AC = deg[deg$celltype == "Thal_AC"&deg$avg_log2FC>0,]$X)
+           
+           
+           
+lt <- list(CTX_SPN = ctx[ctx$celltype == "Ctx_SP"&ctx$avg_log2FC>0,]$X,
+           CTX_ET = ctx[ctx$celltype == "Ctx_ET"&ctx$avg_log2FC>0,]$X,
+           CTX_IT = ctx[ctx$celltype == "Ctx_IT"&ctx$avg_log2FC>0,]$X,
+           CTX_IPC = ctx[ctx$celltype == "Ctx_IPC"&ctx$avg_log2FC>0,]$X,
+           CTX_DIV = ctx[ctx$celltype == "Ctx_DIV"&ctx$avg_log2FC>0,]$X,
+           CTX_RG = ctx[ctx$celltype == "Ctx_RG"&ctx$avg_log2FC>0,]$X)
+
+m = make_comb_mat(lt)
+UpSet(m)
+UpSet(m, top_annotation = upset_top_annotation(m, add_numbers=TRUE),
+      right_annotation = upset_right_annotation(m, add_numbers = TRUE))
+
+, 
+set_order = c("ASD_GWAS","SCZ_GWAS","BP_GWAS","GLUT","GABA","IPC","RG","DIV","AC"))
+
+       
+
+write.csv(intersect(en$X,bp), "bp_en.csv")
+write.csv(intersect(inh$X,bp), "bp_in.csv")
+write.csv(intersect(ac$X,bp), "bp_ac.csv")
+write.csv(intersect(div$X,bp), "bp_div.csv")
+write.csv(intersect(ipc$X,bp), "bp_ipc.csv")
+write.csv(intersect(gl$X,bp), "bp_gl.csv")
+
+write.csv(intersect(en$X,asd), "asd_en.csv")
+write.csv(intersect(inh$X,asd), "asd_in.csv")
+write.csv(intersect(ac$X,asd), "asd_ac.csv")
+write.csv(intersect(div$X,asd), "asd_div.csv")
+write.csv(intersect(ipc$X,asd), "asd_ipc.csv")
+write.csv(intersect(gl$X,asd), "asd_gl.csv")
+
+write.csv(intersect(en$X,scz), "scz_en.csv")
+write.csv(intersect(inh$X,scz), "scz_in.csv")
+write.csv(intersect(ac$X,scz), "scz_ac.csv")
+write.csv(intersect(div$X,scz), "scz_div.csv")
+write.csv(intersect(ipc$X,scz), "scz_ipc.csv")
+write.csv(intersect(gl$X,scz), "scz_gl.csv")
+
+en.int<-intersect(en$X,scz)
+in.int<-intersect(inh$X,scz)
+ac.int<-intersect(ac$X,scz)
+gl.int<-intersect(gl$X,scz)
+div.int<-intersect(div$X,scz)
+ipc.int<-intersect(ipc$X,scz)
+genes <- unique(c(en.int, in.int, ac.int,gl.int,div.int, ipc.int))
+
+en.int<-intersect(en$X,asd)
+in.int<-intersect(inh$X,asd)
+ac.int<-intersect(ac$X,asd)
+gl.int<-intersect(gl$X,asd)
+div.int<-intersect(div$X,asd)
+ipc.int<-intersect(ipc$X,asd)
+genes <- unique(c(en.int, in.int, ac.int,gl.int,div.int, ipc.int))
+length(genes)
+length(asd)
+
+
+#Fisher's exact test for enrichment
+scz <- gwas[gwas$citation == "SCZrare_Singh2022",]$gene #2.759e-6
+scz <- gwas[gwas$citation == "SCZ_Trubetskoy2022",]$gene #2.2e-16
+scz <- pm[pm$condition == "SCZ",]$gene #2.2e-16
+scz <- read.csv("../../celltypes2023/geneticmodifiers22qSCZ_Lin2023MolPsych.csv")$gene
+asd <- gwas[gwas$citation == "ASDrare_FuSatterstrom2022",]$gene #2.2e-16
+ndd <- read.csv("../Fu Satterstrom NDD.csv", header = F)
+dd <- read.csv("../Fu Satterstrom Dev Delay.csv", header = F)
+asd <- gwas[gwas$citation == "ASD_Spark2020",]$gene #4.129e-13
+asd2 <- gwas[gwas$citation == "ASD_Grove2019",]$gene
+asd <- unique(c(asd,asd2))
+asd <- pm[pm$condition == "ASD",]$gene #2.2e-16
+asd <- read.csv("../SFARI-Gene_genes_10-13-2023release_10-29-2023export.csv")
+s1 <- asd[asd$gene.score == 1,]
+bp <- gwas[gwas$citation == "BP_Mullins2021",]$gene # 1.375e-08
+bp <- pm[pm$condition == "BP",]$gene 
+scz2 <- read.csv("../celltypes2023/nehme_div28ngn2.csv")
+
+
+scz <- unique(scz2$external_gene_name)
+
+div0.thal <- intersect(scz3, thal$X)
+div0.ctx <- intersect(scz3, ctx$X)
+div4.thal <- intersect(scz2$external_gene_name, thal$X)
+div4.ctx <- intersect(scz2$external_gene_name, ctx$X)
+div28.thal <- intersect(scz2$external_gene_name, thal$X)
+div28.ctx <- intersect(scz2$external_gene_name, ctx$X)
+
+lt <- list(div0.thal = div0.thal,
+           div0.ctx=div0.ctx,
+           div4.thal=div4.thal,
+           div4.ctx=div4.ctx,
+           div28.thal=div28.thal,
+           div28.ctx=div28.ctx)
+m = make_comb_mat(lt)
+UpSet(m)
+
+#remotes::install_github("browaeysrobin/nichenetr")
+library(nichenetr)
+bkgd.en <- get_expressed_genes("EN", merged, pct = 0.10, assay_oi = NULL)
+bkgd.in <- get_expressed_genes("IN", merged, pct = 0.10, assay_oi = NULL)
+bkgd.ac <- get_expressed_genes("AC", merged, pct = 0.10, assay_oi = NULL)
+bkgd.ipc <- get_expressed_genes("IPC", merged, pct = 0.10, assay_oi = NULL)
+bkgd.gl <- get_expressed_genes("GL", merged, pct = 0.10, assay_oi = NULL)
+bkgd.div <- get_expressed_genes("DIV", merged, pct = 0.10, assay_oi = NULL)
+
+
+pm <- read.csv("/media/chang/HDD-6/david/DEG_analysis/PMID 30545856 Supp Table 1 DGE Geschwind PsychEncode ASD SCZ BP.csv")
+scz <- pm[pm$ASD.fdr < 0.05,]
+scz <- scz[abs(scz$ASD.log2FC) > 0.25,]
+scz <- scz$gene_name
+
+bkgd <- bkgd.en
+diff <- unique(deg$X)#*#*#*#*#*#*#*#*#*#*#*#*#
+diff <- unique(deg[deg$celltype == "Thal_AC",]$X)#*#*#*#*#*#*#*#*#*#*#*#*#
+diff <- unique(ctx$X)#*#*#*#*#*#*#*#*#*#*#*#*#
+diff <- unique(ctx[ctx$celltype == "CTX_ET",]$X)#*#*#*#*#*#*#*#*#*#*#*#*#
+not.diff <- setdiff(bkgd,diff)
+in.list <- scz
+not <- setdiff(bkgd,scz)
+
+#in.list <- asd
+#not <- setdiff(bkgd, asd)
+
+#in.list <- bp
+#not <- setdiff(bkgd, bp)
+
+a <- c(length(intersect(diff, in.list)),length(intersect(not.diff, in.list)))
+a
+b <- c(length(intersect(diff,not)),length(intersect(not.diff,not)))
+c<-rbind(a,b)
+rownames(c) <- c("in.list", "not.in.list")
+colnames(c) <- c("diff", "not.diff")
+
+fisher.test(c, alternative = "greater");a
+
+d <- data.frame(gene.not.interest=c(length(lt$SCZ_GWAS), length(bkgd)-length(lt$SCZ_GWAS)), 
+                gene.in.interest=c(length(intersect(lt$SCZ_GWAS,lt$GABA)), 
+                                   length(lt$GABA)-length(intersect(lt$SCZ_GWAS,lt$GABA))))
+row.names(d) <- c("In_category", "not_in_category")
+fisher.test(d, alternative = "less")
+
+
+
+#MAKE A EULER DIAGRAM! 
+length(intersect(unique(ctx$X),unique(deg$X)))
+length(intersect(ctx$X, scz))
+length(intersect(deg$X, scz))
+
+combo <- c(DEL22Q = length(scz) - length(intersect(deg$X,scz)),
+           THAL = length(unique(deg$X))- length(intersect(deg$X,scz)),
+           "DEL22Q&THAL" = length(intersect(deg$X,scz)))
+
+combo <- c(THAL = length(unique(deg$X))- length(intersect(deg$X,ctx$X)),
+           CTX = length(unique(ctx$X)) - length(intersect(ctx$X,deg$X)),
+           "THAL&CTX" = length(intersect(deg$X,ctx$X)))
+
+
+combo <- c(SCHEMA =length(unique(scz))-
+             length(intersect(ctx$X,scz))-length(intersect(deg$X,scz))+
+             length(intersect(intersect(ctx$X,scz),intersect(deg$X,scz))),
+            CTX=length(unique(ctx$X))-
+             length(intersect(ctx$X,scz))-length(intersect(deg$X,ctx$X))+ 
+              length(intersect(intersect(ctx$X,scz),intersect(deg$X,scz))), 
+           THAL=length(unique(deg$X))-
+             length(intersect(ctx$X,deg$X))-length(intersect(deg$X,scz))+
+             length(intersect(intersect(ctx$X,scz),intersect(deg$X,scz))),
+           "SCHEMA&CTX" = length(intersect(ctx$X,scz))-
+             length(intersect(intersect(ctx$X,scz),intersect(deg$X,scz))),
+           "SCHEMA&THAL" = length(intersect(deg$X,scz))-
+              length(intersect(intersect(ctx$X,scz),intersect(deg$X,scz))),
+           "CTX&THAL" = length(intersect(deg$X,ctx$X))- 
+             length(intersect(intersect(ctx$X,scz),intersect(deg$X,scz))),
+           "SCHEMA&CTX&THAL" = length(intersect(intersect(ctx$X,scz),
+                                      intersect(deg$X,scz))))
+
+length(intersect(unique(ctx$X),unique(deg$X)))
+length(intersect(ctx$X, asd))
+length(intersect(deg$X, asd))
+combo <- c(ASD =length(asd)-
+             length(intersect(ctx$X,asd))-length(intersect(deg$X,asd))+
+             length(intersect(intersect(ctx$X,asd),intersect(deg$X,asd))),
+           CTX=length(ctx$X)-
+             length(intersect(ctx$X,asd))-length(intersect(deg$X,ctx$X))+ 
+             length(intersect(intersect(ctx$X,asd),intersect(deg$X,asd))), 
+           THAL=length(deg$X)-
+             length(intersect(ctx$X,deg$X))-length(intersect(deg$X,asd))+
+             length(intersect(intersect(ctx$X,asd),intersect(deg$X,asd))),
+           "ASD&CTX" = length(intersect(ctx$X,asd)),
+           "ASD&THAL" = length(intersect(deg$X,asd)),
+           "CTX&THAL" = length(intersect(deg$X,ctx$X)),
+           "ASD&CTX&THAL" = length(intersect(intersect(ctx$X,asd),
+                                                intersect(deg$X,asd))))
+
+combo <- c(ASD =length(asd)-
+             length(intersect(deg$X,asd)),
+           THAL=length(unique(deg$X))-
+             length(intersect(deg$X,asd)), 
+           "ASD&THAL" = length(intersect(deg$X,asd)))
+           
+
+fit1 <- euler(combo)
+plot(fit1, fills = dittoColors())
+
+venn.diagram(
+x = list(ctx$X, scz),
+category.names = c("DEG", "SCZ exome"))
+
+
+ggsave("UpsetPlot_GLUT_GWAS-RareCoding.pdf")
+
+
+#comparing DEGs against Geschwind post mortem signatures
+
+lt <- list(GLUT = deg[deg$celltype == "EN",]$gene,
+           GABA = deg[deg$celltype == "IN",]$gene,
+           IPC = deg[deg$celltype == "IPC",]$gene,
+           RG = deg[deg$condition == "RG",]$gene,
+           DIV = deg[deg$condition == "DIV",]$gene,
+           AC = deg[deg$condition == "AC",]$gene,
+           #FB = deg[deg$condition == "FB",]$gene,
+           #EC = deg[deg$condition == "EC",]$gene,
+           ASD = pm[pm$condition == "ASD",]$gene,
+           SCZ = pm[pm$condition == "SCZ",]$gene,
+           BP = pm[pm$condition == "BP",]$gene
+) 
+
+lt <- list(GLUT = en$X,
+           GABA = inh$X,
+           IPC = ipc$X,
+           AC = ac$X,
+           DIV = div$X,
+           GL = gl$X,
+           SCZ = gwas[gwas$citation == "SCZrare_Singh2022",]$gene)
+
+m = make_comb_mat(lt)
+UpSet(m[comb_degree(m)>=2], right_annotation = upset_right_annotation(m,add_numbers=TRUE),
+UpSet(m[10>=comb_degree(m)>=2], 
+      set_order = c("SCZ", "GLUT","GABA","IPC","GL","DIV","AC")) 
+                    
+
+#Fisher's exact test for enrichment
+d <- data.frame(gene.not.interest=c(length(lt$BP), length(bkgd)-length(lt$BP)), 
+                gene.in.interest=c(length(intersect(lt$BP,lt$GLUT)), 
+                                   length(lt$GLUT)-length(intersect(lt$BP,lt$GLUT))))
+row.names(d) <- c("In_category", "not_in_category")
+fisher.test(d, alternative = "less")
+
+
+ggsave("UpsetPlot_EC_GeschwindPostMortemCtx.pdf")
+
+#comparing DEGs against iPS CNV models
+
+lt <- list(
+  GLUT = deg[deg$condition == "Thal_EN",]$gene,
+  GABA = deg[deg$condition == "Thal_IN",]$gene,
+  AC = deg[deg$condition == "Thal_AC",]$gene,
+  IPC = deg[deg$condition == "Thal_IPC",]$gene,
+  GL = deg[deg$condition == "Thal_GL",]$gene,
+  DIV = deg[deg$condition == "Thal_DIV",]$gene,
+  #FB = deg[deg$condition == "FB",]$gene,
+  #EC = deg[deg$condition == "EC",]$gene,
+  DUP16p11_CtxOrg = cnv[cnv$condition == "16p11DUP",]$gene,
+  DEL16p11_CtxOrg = cnv[cnv$condition == "16p11DEL",]$gene,
+  DEL22q11_CtxOrg = cnv[cnv$condition == "22q11DEL",]$gene
+  DEL15q13.3_iN = cnv[cnv$condition == "15q13.3",]$gene,
+  NRXN1A = cnv[cnv$condition == "NRXN1A",]$gene,
+  DEL22q11_iPS = cnv[cnv$condition == "22q11del",]$gene
+)
+  
+lt <- list(
+  GLUT = deg[deg$celltype == "Thal_EN",]$X,
+  GABA = deg[deg$celltype == "Thal_IN",]$X,
+  AC = deg[deg$celltype == "Thal_AC",]$X,
+  IPC = deg[deg$celltype == "Thal_IPC",]$X,
+  GL = deg[deg$celltype == "Thal_GL",]$X,
+  DIV = deg[deg$celltype == "Thal_DIV",]$X,
+  cutandtag = cutandtag
+)
+
+
+lt <- list(
+  THAL = deg$X,
+  CTX = ctx$X,
+  ASD = gwas[gwas$citation == "ASDrare_FuSatterstrom2022",]$gene, #2.2e-16
+  NDD = ndd$V1,
+  DD = dd$V1
+)
+
+lt <- list(
+  THAL = deg$X,
+  CTX = ctx$X,
+  SCZ = gwas[gwas$citation %in% c("SCZ_Trubetskoy2022"),]$gene, #2.2e-16
+  ASD = gwas[gwas$citation %in% c("ASD_Spark2020","ASD_Grove2019"),]$gene,
+  BP = gwas[gwas$citation %in% c("BP_Mullins2021"),]$gene
+)
+
+pm <- read.csv("/media/chang/HDD-6/david/DEG_analysis/PMID 30545856 Supp Table 1 DGE Geschwind PsychEncode ASD SCZ BP.csv")
+scz <- pm[pm$SCZ.fdr < 0.05,]
+scz <- scz[abs(scz$SCZ.log2FC) > 0.25,]
+scz <- scz$gene_name
+asd <- pm[pm$ASD.fdr < 0.05,]
+asd <- asd[abs(asd$ASD.log2FC) > 0.25,]
+asd <- asd$gene_name
+bp <- pm[pm$BD.fdr < 0.05,]
+bp <- bp[abs(bp$BD.log2FC) > 0.25,]
+bp <- bp$gene_name
+
+lt <- list(THAL = deg$X,
+           CTX = ctx$X,
+           SCZ = na.omit(scz),
+           ASD = na.omit(asd),
+           BP = na.omit(bp)
+)
+
+div28 <- read.csv("../celltypes2023/nehme_div28ngn2.csv")
+div4 <- read.csv("../celltypes2023/nehme_div4ngn2.csv")
+div0 <- read.csv("../celltypes2023/nehme_div0ngn2.csv")
+
+lt <- list(THAL = deg$X,
+           CTX = ctx$X,
+           DIV0 = div0$external_gene_name[1:212],
+           DIV4 = div4$external_gene_name[1:216],
+           DIV28 = div28$external_gene_name
+)
+
+
+m = make_comb_mat(lt)
+UpSet(m[comb_degree(m)>=2], right_annotation = upset_right_annotation(m,add_numbers=TRUE),
+      top_annotation = upset_top_annotation(m[comb_degree(m)>=2],add_numbers=TRUE))
+
+, 
+      set_order = c("SCZ","THAL","CTX"), ) 
+
+
+musGenes <- c("Hmmr", "Tlx3", "Cpeb4")
+
+# Basic function to convert mouse to human gene names
+convertMouseGeneList <- function(x){
+  
+  require("biomaRt")
+  human = useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl", mirror = "asia")
+  mouse = useEnsembl("ensembl", dataset = "mmusculus_gene_ensembl", mirror = "asia")
+  
+  genesV2 = getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol", 
+                   values = x$markers , mart = mouse, attributesL = c("hgnc_symbol"), 
+                   martL = human, uniqueRows=T)
+  humanx <- unique(genesV2[, 2])
+  
+  
+  library(dplyr)
+  mouse_human_genes = read.csv("http://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt",sep="\t")
+  
+  convert_mouse_to_human <- function(gene_list){
+    
+    output = c()
+    
+    for(gene in gene_list){
+      class_key = (mouse_human_genes %>% filter(Symbol == gene & Common.Organism.Name=="mouse, laboratory"))[['DB.Class.Key']]
+      if(!identical(class_key, integer(0)) ){
+        human_genes = (mouse_human_genes %>% filter(DB.Class.Key == class_key & Common.Organism.Name=="human"))[,"Symbol"]
+        for(human_gene in human_genes){
+          output = append(output,human_gene)
+        }
+      }
+    }
+    
+    return (output)
+  }
+  
+  # Print the first 6 genes found to the screen
+  print(head(humanx))
+  return(humanx)
+}
+
+genes <- convertMouseGeneList(scz$GeneSymbol)
+
+
+
+m = make_comb_mat(lt)
+UpSet(m[comb_degree(m)==2], 
+      set_order = c("DEL22q11_CtxOrg","DEL22q11_iPS",
+                    "DUP16p11_CtxOrg", "DEL16p11_CtxOrg",
+                    "DEL15q13.3_iN", "NRXN1A", 
+                    "GLUT","GABA","IPC","RG","DIV","AC")) 
+
+
+ggsave("UpsetPlot_EC_iPS-CNV.pdf")
+
+library(EnhancedVolcano)
+EnhancedVolcano(deg,
+lab = deg$X,
+x = 'avg_log2FC',
+y = 'p_val_adj',
+FCcutoff = 0.25,
+labSize = 7,
+xlim = c(-0.75,0.75)
+,ylim = c(0,100))
+
+
+####MAKE A DOTPLOT FOR INTERSECTED GENES
+#gene_cluster: deg dataframe
+#Gene: column carrying genes
+#markers: markers you'd like to filter for 
+
+deg$dataset <- "Thal"
+ctx$dataset <- "Ctx"
+ctx2$dataset <- "Ctx"
+gene_cluster <- rbind(deg,ctx)
+
+gene_cluster$celltype <- factor(gene_cluster$celltype, levels = c(
+  "Thal_EN","Thal_IN","Thal_AC","Thal_IPC","Thal_GL","Thal_DIV",
+  "CTX_ET","CTX_IT","CTX_IPC","CTX_RG","CTX_DIV")
+))
+
+gene_cluster <- gene_cluster[gene_cluster$X %in% asd,]
+gene_cluster <- gene_cluster[gene_cluster$X %in% tf,]
+table(gene_cluster$celltype)
+
+intersect <- intersect(intersect(gene_cluster[gene_cluster$dataset == "Ctx",]$X, asd), 
+                  intersect(gene_cluster[gene_cluster$dataset == "Thal",]$X,asd))
+setdiff.ctx <- setdiff(intersect(gene_cluster[gene_cluster$dataset == "Ctx",]$X, asd), 
+               intersect(gene_cluster[gene_cluster$dataset == "Thal",]$X,asd))
+setdiff.thal <- setdiff(intersect(gene_cluster[gene_cluster$dataset == "Thal",]$X, asd), 
+                        intersect(gene_cluster[gene_cluster$dataset == "Ctx",]$X,asd))
+setdiff <- unique(c(setdiff.ctx,setdiff.thal))
+
+scz2 <- c(
+  setdiff(intersect(gene_cluster[gene_cluster$dataset == "Ctx",]$X, scz), 
+          intersect(gene_cluster[gene_cluster$dataset == "Thal",]$X,scz)),
+  setdiff(intersect(gene_cluster[gene_cluster$dataset == "Thal",]$X, scz), 
+          intersect(gene_cluster[gene_cluster$dataset == "Ctx",]$X,scz)),
+  intersect(intersect(gene_cluster[gene_cluster$dataset == "Ctx",]$X, scz), 
+          intersect(gene_cluster[gene_cluster$dataset == "Thal",]$X,scz))
+)
+
+
+
+gene_cluster2 <- gene_cluster[gene_cluster$X%in%rev(intersect),]
+gene_cluster2 <- gene_cluster[gene_cluster$X%in%rev(setdiff),]
+gene_cluster2$X <- factor(gene_cluster2$X, 
+                         levels = c(setdiff.thal,setdiff.ctx))
+
+gene_cluster$X <- factor(gene_cluster$X, 
+                         levels = c(setdiff.ctx,setdiff.thal, intersect))
+
+
+gene_cluster2 <- gene_cluster[gene_cluster$X%in%asd3,]
+gene_cluster2$X <- factor(gene_cluster2$X, levels = scz2)
+
+#gene_cluster <- gene_cluster[abs(gene_cluster$avg_log2FC) >=0.25,]
+
+
+  ggplot(gene_cluster, aes(x=celltype, y = X, color = avg_log2FC, size = -log10(p_val_adj))) + 
+  geom_point() + 
+  theme_minimal()+
+  theme(axis.line  = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust=1)) +
+  ylab('') +
+  theme(axis.ticks = element_blank()) +
+  scale_color_gradientn(colours = c("#0072B2","white", "red"), limits = c(-0.6,0.6),oob = scales::squish, name = 'avg_log2FC')+
+  scale_x_discrete(limits=rev) + coord_flip()
+#scale_y_discrete(limits=rev) 
+  
+sig.table <- read.csv("/media/chang/HDD-6/david/DEG_analysis/DEG overlap with psychiatric disease genes - significance table.csv")
+thal.sig <- sig.table[sig.table$system == "ThalamusOrg",]
+thal.sig <- thal.sig[thal.sig$psych.risk.gene %in%
+c("scz_rare","asd_rare","scz_gwas","asd_gwas","bp_gwas", "scz_geneticmod22q"),]
+
+ctx.sig <- sig.table[sig.table$system == "CorticalOrg",]
+ctx.sig <- ctx.sig[ctx.sig$psych.risk.gene %in%
+                       c("scz_rare","asd_rare","scz_gwas","asd_gwas","bp_gwas", "scz_geneticmod22q"),]
+
+thal.sig$FDR <-p.adjust(thal.sig$significance, method = "fdr",
+                         n = length(thal.sig$significance)) 
+thal.sig$log10FDR <- -log10(thal.sig$FDR)
+ctx.sig$FDR <-p.adjust(ctx.sig$significance, method = "fdr",
+                        n = length(ctx.sig$significance)) 
+ctx.sig$log10FDR <- -log10(ctx.sig$FDR)
+
+thal.sig$celltype <- factor(thal.sig$celltype,levels = c(
+  "All Cell Types", "EN", "IN", "AC", "IPC","GL","DIV"
+))
+
+
+thal.sig$psych.risk.gene <- factor(thal.sig$psych.risk.gene, levels = rev(c(
+  "scz_rare","asd_rare","sfari","sfari_1", "scz_gwas","asd_gwas","bp_gwas", 
+  "scz_pm", "asd_pm","bp_pm"
+)))
+
+ctx.sig$celltype <- factor(ctx.sig$celltype,levels = c(
+  "All Cell Types", "EN", "IPC","RG","DIV"
+))
+
+ctx.sig$psych.risk.gene <- factor(ctx.sig$psych.risk.gene, levels = rev(c(
+  "scz_rare","asd_rare", "scz_gwas","asd_gwas","bp_gwas", "scz_geneticmod22q",
+  "scz_pm", "asd_pm","bp_pm"
+)))
+
+
+ggplot(ctx.sig, aes(x=celltype, y = psych.risk.gene, 
+                     color = log10FDR, size = overlap)) + 
+  geom_point() + 
+  theme_minimal() + 
+  theme(axis.line  = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  ylab('') +
+  theme(axis.ticks = element_blank()) +
+  scale_color_gradientn(colours = c("white",rev(viridis::magma(10))), limits = c(2,10),
+                        oob = scales::squish, name = 'log10(FDR)')
+ctx.sig$celltype <- plyr::mapvalues(ctx.sig$celltype, from = "DIV", to = "DIV-Ctx")
+ctx.sig$celltype <- plyr::mapvalues(ctx.sig$celltype, from = "RG", to = "RG-Ctx")
+ctx.sig$celltype <- plyr::mapvalues(ctx.sig$celltype, from = "IPC", to = "IPC-Ctx")
+ctx.sig$celltype <- plyr::mapvalues(ctx.sig$celltype, from = "EN", to = "EN-Ctx")
+ctx.sig$celltype <- plyr::mapvalues(ctx.sig$celltype, from = "All Cell Types", to = "All-Ctx")
+
+sig <- rbind(thal.sig, ctx.sig)
+sig$celltype <- factor(sig$celltype,levels = c(
+  "All Cell Types", "EN","IN", "AC","IPC","GL","DIV", "All-Ctx", "EN-Ctx", "IPC-Ctx",
+  "RG-Ctx","DIV-Ctx"))
+sig$psych.risk.gene <- factor(sig$psych.risk.gene, levels = rev(c(
+  "scz_rare","asd_rare", "scz_gwas","asd_gwas","bp_gwas", "scz_geneticmod22q",
+  "scz_pm", "asd_pm","bp_pm"
+)))
+
+
+ggplot(sig, aes(x=celltype, y = psych.risk.gene, 
+                    color = log10FDR)) + 
+  geom_point(aes(size = overlap)) + 
+  cowplot::theme_cowplot()+
+  theme(axis.line  = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust=1)) +
+  ylab('') +
+  theme(axis.ticks = element_blank()) +
+  scale_color_gradientn(colours = c("white",rev(viridis::magma(10))), limits = c(2,10),
+                        oob = scales::squish, name = 'log10(FDR)')
+
+
+#linear 
+
+pm <- read.csv("/media/chang/HDD-6/david/DEG_analysis/PMID 30545856 Supp Table 1 DGE Geschwind PsychEncode ASD SCZ BP.csv")
+scz <- pm[pm$SCZ.fdr < 0.05,]
+scz <- scz[abs(scz$SCZ.log2FC) > 0.25,]
+colnames(scz)
+
+scz <- read.csv("../../celltypes2023/nehme_div28ngn2.csv")
+scz <- read.csv("../../celltypes2023/nehme_div4ngn2.csv")
+scz <- read.csv("../../celltypes2023/nehme_div0ngn2.csv")
+
+scz$gene_name <- scz$external_gene_name
+
+thal2 <- thal[thal$celltype == "Thal_EN",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- cbind(thal2, scz2$log2FoldChange)
+#data <- cbind(thal2, scz2$BD.log2FC)
+#data <- cbind(thal2, scz2$ASD.log2FC)
+data <- cbind(thal2, scz2$SCZ.log2FC)
+
+thal2 <- thal[thal$celltype == "Thal_IN",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_IPC",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_AC",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_GL",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_DIV",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+colnames(data) <- c("gene", "log2FC_NOW", "celltype", "log2FC_Gandal")
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal, 
+                color = celltype, label = gene)) + 
+  geom_point(size = 2) + theme_minimal() + geom_text()
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal, 
+                 color = celltype)) + 
+  geom_point(size = 2) + theme_minimal() 
+
+
+#+ 
+  #theme_minimal()+
+  #theme(axis.line  = element_blank()) +
+  #ylab('') +
+  #theme(axis.ticks = element_blank()) 
+  
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal,
+color = celltype, label = X)) +
+geom_point() + theme_minimal() + geom_text()
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal,
+color = celltype, label = gene)) +
+geom_point() + theme_minimal() + geom_text()
+
+
+
+
+
+ctx2 <- ctx[,colnames(ctx) %in% c("X","avg_log2FC","celltype")]
+
+thal2 <- ctx2[ctx2$celltype == "CTX_ET",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- cbind(thal2, scz2$log2FoldChange)
+#data <- cbind(thal2, scz2$BD.log2FC)
+#data <- cbind(thal2, scz2$ASD.log2FC)
+data <- cbind(thal2, scz2$SCZ.log2FC)
+
+thal2 <- ctx2[ctx2$celltype == "CTX_IT",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+thal2 <- ctx2[ctx2$celltype == "CTX_IPC",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+thal2 <- ctx2[ctx2$celltype == "CTX_RG",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+thal2 <- ctx2[ctx2$celltype == "CTX_DIV",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+scz2 <- scz2[order(scz2$gene_name),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- rbind(data,cbind(thal2, scz2$log2FoldChange))
+#data <- rbind(data,cbind(thal2, scz2$BD.log2FC))
+#data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+data <- rbind(data,cbind(thal2, scz2$SCZ.log2FC))
+
+colnames(data) <- c("gene", "log2FC_NOW", "celltype", "log2FC_Gandal")
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal, 
+                 color = celltype, label = gene)) + 
+  geom_point() + theme_minimal() + geom_text()
+#+ 
+#theme_minimal()+
+#theme(axis.line  = element_blank()) +
+#ylab('') +
+#theme(axis.ticks = element_blank()) 
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal,
+                 color = celltype)) +
+  geom_point(size = 2) + theme_minimal() 
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal,
+                 color = celltype, label = gene)) +
+  geom_point(size = 1) + theme_minimal() + geom_text()
+
+
+
+
+####### ASD post-mortem ######
+pm <- read.csv("/media/chang/HDD-6/david/DEG_analysis/PMID 30545856 Supp Table 1 DGE Geschwind PsychEncode ASD SCZ BP.csv")
+scz <- pm[pm$ASD.fdr < 0.05,]
+scz <- scz[abs(scz$ASD.log2FC) > 0.25,]
+colnames(scz)
+
+scz <- scz[,colnames(scz) %in% c("gene_name", "ASD.log2FC")]
+
+thal <- deg[,colnames(deg) %in% c("X","avg_log2FC","celltype")]
+
+thal2 <- thal[thal$celltype == "Thal_EN",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- cbind(thal2, scz2$ASD.log2FC)
+
+thal2 <- thal[thal$celltype == "Thal_IN",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_IPC",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_AC",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_GL",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_DIV",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+colnames(data) <- c("gene", "log2FC_NOW", "celltype", "log2FC_Gandal")
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal, 
+                 color = celltype)) + 
+  geom_point(size = 2) + theme_minimal()
+
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal,
+                 color = celltype, label = gene)) +
+  geom_point(size = 1) + theme_minimal() + geom_text()
+
+
+ctx2 <- ctx[,colnames(ctx) %in% c("X","avg_log2FC","celltype")]
+
+thal2 <- ctx2[ctx2$celltype == "CTX_ET",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- cbind(thal2, scz2$ASD.log2FC)
+
+thal2 <- ctx2[ctx2$celltype == "CTX_IT",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- ctx2[ctx2$celltype == "CTX_IPC",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- ctx2[ctx2$celltype == "CTX_RG",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- ctx2[ctx2$celltype == "CTX_DIV",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+thal2 <- thal[thal$celltype == "Thal_DIV",]
+intersect <- intersect(thal2$X,scz$gene_name)
+scz2 <- scz[scz$gene_name %in% intersect,]
+thal2 <- thal2[thal2$X %in% intersect,]
+data <- rbind(data,cbind(thal2, scz2$ASD.log2FC))
+
+colnames(data) <- c("gene", "log2FC_NOW", "celltype", "log2FC_Gandal")
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal, 
+                 color = celltype)) + 
+  geom_point() + theme_minimal()
+#+ 
+#theme_minimal()+
+#theme(axis.line  = element_blank()) +
+#ylab('') +
+#theme(axis.ticks = element_blank()) 
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal,
+                 color = celltype)) +
+  geom_point(size = 2) + theme_minimal() 
+
+ggplot(data, aes(x= log2FC_NOW, y = log2FC_Gandal,
+                 color = celltype, label = gene)) +
+  geom_point(size = 1) + theme_minimal() + geom_text()
+
+
+
+### Comparison of Cortical and Thalamic Organoid Similar Cell Types
+
+thal2 <- thal[thal$celltype == "Thal_AC",]
+ctx2 <- ctx[ctx$celltype == "CTX_RG",]
+intersect <- intersect(thal2$X,ctx2$X)
+ctx2 <- ctx2[ctx2$X %in% intersect,]
+ctx2 <- ctx2[order(ctx2$X),]
+thal2 <- thal2[thal2$X %in% intersect,]
+thal2 <- thal2[order(thal2$X),]
+#data <- cbind(thal2, scz2$log2FoldChange)
+#data <- cbind(thal2, scz2$BD.log2FC)
+#data <- cbind(thal2, scz2$ASD.log2FC)
+data <- cbind(thal2, ctx2$avg_log2FC)
+
+colnames(data) <- c("gene", "log2FC_THAL", "celltype", "log2FC_CTX")
+
+ggplot(data, aes(x= log2FC_THAL, y = log2FC_CTX, color = celltype)) + 
+  geom_point(size = 2) + theme_minimal()
+
+###### UpSet Plot of Celltype DEGs ######
+
+lt <- list(THAL_EN = deg[deg$celltype == "Thal_EN",]$X,
+           THAL_IN = deg[deg$celltype == "Thal_IN",]$X,
+           THAL_IPC = deg[deg$celltype == "Thal_IPC",]$X,
+           THAL_GL = deg[deg$celltype == "Thal_GL",]$X,
+           THAL_DIV = deg[deg$celltype == "Thal_DIV",]$X,
+           THAL_AC = deg[deg$celltype == "Thal_AC",]$X)
+
+m = make_comb_mat(lt)
+UpSet(m, set_order = c("THAL_EN","THAL_IN","THAL_AC",
+                       "THAL_IPC","THAL_GL","THAL_DIV"))
+
+
+lt <- list(CTX_ET = ctx[ctx$celltype == "CTX_ET",]$X,
+           CTX_IT = ctx[ctx$celltype == "CTX_IT",]$X,
+           CTX_IPC = ctx[ctx$celltype == "CTX_IPC",]$X,
+           CTX_DIV = ctx[ctx$celltype == "CTX_DIV",]$X,
+           CTX_RG = ctx[ctx$celltype == "CTX_RG",]$X)
+
+m = make_comb_mat(lt)
+UpSet(m, set_order = c("CTX_ET","CTX_IT","CTX_IPC",
+                       "CTX_DIV","CTX_RG"))
+
+
+
+
+
+## Dotplot of significant overlap 
+
+table <- read.csv("/media/chang/HDD-6/david/DEG_analysis/DEG overlap with psychiatric disease genes - significance table(2).csv")
+table$fdr <- p.adjust(table$significance, method = "fdr")
+table$org.celltype <- paste0(table$system,"_",table$celltype)
+table$log10FDR <- -log10(table$fdr)
+
+table$org.celltype <- factor(table$org.celltype, levels = 
+                             c("ThalamusOrg_All Cell Types",
+                               "ThalamusOrg_EN","ThalamusOrg_IN","ThalamusOrg_AC","ThalamusOrg_IPC","ThalamusOrg_GL",
+                               "ThalamusOrg_DIV","CorticalOrg_All Cell Types","CorticalOrg_ET","CorticalOrg_IT",
+                               "CorticalOrg_IPC","CorticalOrg_RG","CorticalOrg_DIV"))
+table$ratio <- table$overlap/table$total
+
+table <- table[table$psych.risk.gene %in% c(
+  "scz_rare","asd_rare","DD","NDD","sfari","sfari_1", "scz_gwas","asd_gwas","bp_gwas", 
+  "scz_pm", "asd_pm","bp_pm","nehmeDiv0","nehmeDiv4","nehmeDiv28"),]
+
+table$psych.risk.gene <- factor(table$psych.risk.gene, levels = rev(c(
+  "scz_rare","asd_rare","DD","NDD","sfari","sfari_1", "scz_gwas","asd_gwas","bp_gwas", 
+  "scz_pm", "asd_pm","bp_pm","nehmeDiv0","nehmeDiv4","nehmeDiv28"
+)))
+
+
+ggplot(table, aes(x=org.celltype, y = psych.risk.gene, 
+                color = log10FDR)) + 
+  geom_point(aes(size = ratio)) + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust=1)) +
+  ylab('') +
+  theme(axis.ticks = element_blank()) +
+  scale_color_gradientn(colours = c("white",rev(viridis::magma(10))), limits = c(2,20),
+                        oob = scales::squish, name = 'log10(FDR)')
+
+
